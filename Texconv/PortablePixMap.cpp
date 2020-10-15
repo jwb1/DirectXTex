@@ -25,41 +25,12 @@
 #include <memory>
 
 #include "DirectXTex.h"
+#include "scoped.h"
 
 using namespace DirectX;
 
 namespace
 {
-    struct handle_closer { void operator()(HANDLE h) noexcept { if (h) CloseHandle(h); } };
-
-    using ScopedHandle = std::unique_ptr<void, handle_closer>;
-
-    inline HANDLE safe_handle(HANDLE h) noexcept { return (h == INVALID_HANDLE_VALUE) ? nullptr : h; }
-
-    class auto_delete_file
-    {
-    public:
-        auto_delete_file(HANDLE hFile) noexcept : m_handle(hFile) {}
-
-        auto_delete_file(const auto_delete_file&) = delete;
-        auto_delete_file& operator=(const auto_delete_file&) = delete;
-
-        ~auto_delete_file()
-        {
-            if (m_handle)
-            {
-                FILE_DISPOSITION_INFO info = {};
-                info.DeleteFile = TRUE;
-                (void)SetFileInformationByHandle(m_handle, FileDispositionInfo, &info, sizeof(info));
-            }
-        }
-
-        void clear() noexcept { m_handle = nullptr; }
-
-    private:
-        HANDLE m_handle;
-    };
-
     inline size_t FindEOL(_In_z_ const char* pString, size_t max)
     {
         size_t pos = 0;

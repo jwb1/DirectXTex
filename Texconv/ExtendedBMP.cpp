@@ -28,17 +28,12 @@
 #include <memory>
 
 #include "DirectXTex.h"
+#include "scoped.h"
 
 using namespace DirectX;
 
 namespace
 {
-    struct handle_closer { void operator()(HANDLE h) noexcept { if (h) CloseHandle(h); } };
-
-    using ScopedHandle = std::unique_ptr<void, handle_closer>;
-
-    inline HANDLE safe_handle(HANDLE h) noexcept { return (h == INVALID_HANDLE_VALUE) ? nullptr : h; }
-
     HRESULT ReadData(_In_z_ const wchar_t* szFile, std::unique_ptr<uint8_t[]>& blob, size_t& blobSize)
     {
         blob.reset();
