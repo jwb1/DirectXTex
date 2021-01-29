@@ -19,13 +19,20 @@
 #define NOHELP
 #pragma warning(pop)
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <assert.h>
+#include <ShlObj.h>
 
+#include <algorithm>
+#include <cassert>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cwchar>
 #include <fstream>
-#include <memory>
+#include <iterator>
 #include <list>
+#include <memory>
+#include <new>
+#include <string>
 
 #include <wrl\client.h>
 
@@ -113,6 +120,7 @@ namespace
         OPT_ROTATE_COLOR,
         OPT_PAPER_WHITE_NITS,
         OPT_BCNONMULT4FIX,
+        OPT_SWIZZLE,
         OPT_MAX
     };
 
@@ -131,7 +139,7 @@ namespace
     struct SConversion
     {
         wchar_t szSrc[MAX_PATH];
-        wchar_t szDest[MAX_PATH];
+        wchar_t szFolder[MAX_PATH];
     };
 
     struct SValue
@@ -198,6 +206,7 @@ namespace
         { L"rotatecolor",   OPT_ROTATE_COLOR },
         { L"nits",          OPT_PAPER_WHITE_NITS },
         { L"fixbc4x4",      OPT_BCNONMULT4FIX },
+        { L"swizzle",       OPT_SWIZZLE },
         { nullptr,          0 }
     };
 
@@ -519,7 +528,7 @@ namespace
         return L"";
     }
 
-    void SearchForFiles(const wchar_t* path, std::list<SConversion>& files, bool recursive)
+    void SearchForFiles(const wchar_t* path, std::list<SConversion>& files, bool recursive, const wchar_t* folder)
     {
         // Process files
         WIN32_FIND_DATAW findData = {};
@@ -537,8 +546,12 @@ namespace
                     wchar_t dir[_MAX_DIR] = {};
                     _wsplitpath_s(path, drive, _MAX_DRIVE, dir, _MAX_DIR, nullptr, 0, nullptr, 0);
 
-                    SConversion conv;
+                    SConversion conv = {};
                     _wmakepath_s(conv.szSrc, drive, dir, findData.cFileName, nullptr);
+                    if (folder)
+                    {
+                        wcscpy_s(conv.szFolder, folder);
+                    }
                     files.push_back(conv);
                 }
 
@@ -572,7 +585,9 @@ namespace
                     if (findData.cFileName[0] != L'.')
                     {
                         wchar_t subdir[MAX_PATH] = {};
-
+                        auto subfolder = (folder)
+                            ? (std::wstring(folder) + std::wstring(findData.cFileName) + L"\\")
+                            : (std::wstring(findData.cFileName) + L"\\");
                         {
                             wchar_t drive[_MAX_DRIVE] = {};
                             wchar_t dir[_MAX_DIR] = {};
@@ -583,7 +598,7 @@ namespace
                             _wmakepath_s(subdir, drive, dir, fname, ext);
                         }
 
-                        SearchForFiles(subdir, files, recursive);
+                        SearchForFiles(subdir, files, recursive, subfolder.c_str());
                     }
                 }
 
@@ -700,7 +715,7 @@ namespace
         wchar_t version[32] = {};
 
         wchar_t appName[_MAX_PATH] = {};
-        if (GetModuleFileNameW(nullptr, appName, _countof(appName)))
+        if (GetModuleFileNameW(nullptr, appName, static_cast<UINT>(std::size(appName))))
         {
             DWORD size = GetFileVersionInfoSizeW(appName, nullptr);
             if (size > 0)
@@ -763,6 +778,8 @@ namespace
 
         wprintf(L"Usage: texconv <options> <files>\n\n");
         wprintf(L"   -r                  wildcard filename search is recursive\n");
+        wprintf(L"     -r:flatten        flatten the directory structure (default)\n");
+        wprintf(L"     -r:keep           keep the directory structure\n");
         wprintf(L"   -flist <filename>   use text file with a list of input files (one per line)\n");
         wprintf(L"\n   -w <n>              width\n");
         wprintf(L"   -h <n>              height\n");
@@ -831,6 +848,7 @@ namespace
         wprintf(L"   -x2bias             Enable *2 - 1 conversion cases for unorm/pos-only-float\n");
         wprintf(L"   -inverty            Invert Y (i.e. green) channel values\n");
         wprintf(L"   -reconstructz       Rebuild Z (blue) channel assuming X/Y are normals\n");
+        wprintf(L"   -swizzle <rgba>     Swizzle image channels using HLSL-style mask\n");
 
         wprintf(L"\n   <format>: ");
         PrintList(13, g_pFormats);
@@ -918,7 +936,7 @@ namespace
         D3D_FEATURE_LEVEL fl;
         HRESULT hr = s_DynamicD3D11CreateDevice(pAdapter.Get(),
             (pAdapter) ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
-            nullptr, createDeviceFlags, featureLevels, _countof(featureLevels),
+            nullptr, createDeviceFlags, featureLevels, static_cast<UINT>(std::size(featureLevels)),
             D3D11_SDK_VERSION, pDevice, &fl, nullptr);
         if (SUCCEEDED(hr))
         {
@@ -1009,26 +1027,26 @@ namespace
 
     const XMMATRIX c_from709to2020 =
     {
-        XMVECTOR { 0.6274040f, 0.0690970f, 0.0163916f, 0.f },
-        XMVECTOR { 0.3292820f, 0.9195400f, 0.0880132f, 0.f },
-        XMVECTOR { 0.0433136f, 0.0113612f, 0.8955950f, 0.f },
-        XMVECTOR { 0.f,        0.f,        0.f,        1.f }
+        0.6274040f, 0.0690970f, 0.0163916f, 0.f,
+        0.3292820f, 0.9195400f, 0.0880132f, 0.f,
+        0.0433136f, 0.0113612f, 0.8955950f, 0.f,
+        0.f,        0.f,        0.f,        1.f
     };
 
     const XMMATRIX c_from2020to709 =
     {
-        XMVECTOR { 1.6604910f,  -0.1245505f, -0.0181508f, 0.f },
-        XMVECTOR { -0.5876411f,  1.1328999f, -0.1005789f, 0.f },
-        XMVECTOR { -0.0728499f, -0.0083494f,  1.1187297f, 0.f },
-        XMVECTOR { 0.f,          0.f,         0.f,        1.f }
+        1.6604910f,  -0.1245505f, -0.0181508f, 0.f,
+        -0.5876411f,  1.1328999f, -0.1005789f, 0.f,
+        -0.0728499f, -0.0083494f,  1.1187297f, 0.f,
+        0.f,          0.f,         0.f,        1.f
     };
 
     const XMMATRIX c_fromP3to2020 =
     {
-        XMVECTOR { 0.753845f, 0.0457456f, -0.00121055f, 0.f },
-        XMVECTOR { 0.198593f, 0.941777f,   0.0176041f,  0.f },
-        XMVECTOR { 0.047562f, 0.0124772f,  0.983607f,   0.f },
-        XMVECTOR { 0.f,       0.f,         0.f,         1.f }
+        0.753845f, 0.0457456f, -0.00121055f, 0.f,
+        0.198593f, 0.941777f,   0.0176041f,  0.f,
+        0.047562f, 0.0124772f,  0.983607f,   0.f,
+        0.f,       0.f,         0.f,         1.f
     };
 
     inline float LinearToST2084(float normalizedLinearValue)
@@ -1041,6 +1059,61 @@ namespace
     {
         float normalizedLinear = pow(std::max(pow(abs(ST2084), 1.0f / 78.84375f) - 0.8359375f, 0.0f) / (18.8515625f - 18.6875f * pow(abs(ST2084), 1.0f / 78.84375f)), 1.0f / 0.1593017578f);
         return normalizedLinear;
+    }
+
+    bool ParseSwizzleMask(_In_reads_(4) const wchar_t* mask, _Out_writes_(4) uint32_t* swizzleElements)
+    {
+        if (!mask || !swizzleElements)
+            return false;
+
+        if (!mask[0])
+            return false;
+
+        for (size_t j = 0; j < 4; ++j)
+        {
+            if (!mask[j])
+                break;
+
+            switch (mask[j])
+            {
+            case L'R':
+            case L'X':
+            case L'r':
+            case L'x':
+                for (size_t k = j; k < 4; ++k)
+                    swizzleElements[k] = 0;
+                break;
+
+            case L'G':
+            case L'Y':
+            case L'g':
+            case L'y':
+                for (size_t k = j; k < 4; ++k)
+                    swizzleElements[k] = 1;
+                break;
+
+            case L'B':
+            case L'Z':
+            case L'b':
+            case L'z':
+                for (size_t k = j; k < 4; ++k)
+                    swizzleElements[k] = 2;
+                break;
+
+            case L'A':
+            case L'W':
+            case L'a':
+            case L'w':
+                for (size_t k = j; k < 4; ++k)
+                    swizzleElements[k] = 3;
+                break;
+
+            default:
+                return false;
+            }
+        }
+
+        return true;
     }
 }
 
@@ -1075,6 +1148,8 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
     DWORD dwRotateColor = 0;
     float paperWhiteNits = 200.f;
     float preserveAlphaCoverageRef = 0.0f;
+    bool keepRecursiveDirs = false;
+    uint32_t swizzleElements[4] = { 0, 1, 2, 3 };
 
     wchar_t szPrefix[MAX_PATH] = {};
     wchar_t szSuffix[MAX_PATH] = {};
@@ -1141,6 +1216,8 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
             case OPT_ROTATE_COLOR:
             case OPT_PAPER_WHITE_NITS:
             case OPT_PRESERVE_ALPHA_COVERAGE:
+            case OPT_SWIZZLE:
+                // These support either "-arg:value" or "-arg value"
                 if (!*pValue)
                 {
                     if ((iArg + 1 >= argc))
@@ -1332,7 +1409,6 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                 else
                 {
                     wprintf(L"Invalid value specified for -nmap (%ls), missing l, r, g, b, or a\n\n", pValue);
-                    PrintUsage();
                     return 1;
                 }
 
@@ -1380,7 +1456,6 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                 else if (nmapAmplitude < 0.f)
                 {
                     wprintf(L"Normal map amplitude must be positive (%ls)\n\n", pValue);
-                    PrintUsage();
                     return 1;
                 }
                 break;
@@ -1394,7 +1469,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                 }
                 else if (adapter < 0)
                 {
-                    wprintf(L"Adapter index (%ls)\n\n", pValue);
+                    wprintf(L"Invalid adapter index (%ls)\n\n", pValue);
                     PrintUsage();
                     return 1;
                 }
@@ -1482,7 +1557,6 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                 if (!found)
                 {
                     wprintf(L"Invalid value specified for -bc (%ls), missing d, u, q, or x\n\n", pValue);
-                    PrintUsage();
                     return 1;
                 }
             }
@@ -1533,6 +1607,23 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                 }
                 break;
 
+            case OPT_RECURSIVE:
+                if (*pValue)
+                {
+                    // This option takes 'flatten' or 'keep' with ':' syntax
+                    if (!_wcsicmp(pValue, L"keep"))
+                    {
+                        keepRecursiveDirs = true;
+                    }
+                    else if (_wcsicmp(pValue, L"flatten") != 0)
+                    {
+                        wprintf(L"For recursive use -r, -r:flatten, or -r:keep\n\n");
+                        PrintUsage();
+                        return 1;
+                    }
+                }
+                break;
+
             case OPT_FILELIST:
             {
                 std::wifstream inFile(pValue);
@@ -1564,7 +1655,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                     }
                     else
                     {
-                        SConversion conv;
+                        SConversion conv = {};
                         wcscpy_s(conv.szSrc, MAX_PATH, fname);
                         conversion.push_back(conv);
                     }
@@ -1602,12 +1693,26 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                     return 1;
                 }
                 break;
+
+            case OPT_SWIZZLE:
+                if (!*pValue || wcslen(pValue) > 4)
+                {
+                    wprintf(L"Invalid value specified with -swizzle (%ls)\n\n", pValue);
+                    PrintUsage();
+                    return 1;
+                }
+                else if (!ParseSwizzleMask(pValue, swizzleElements))
+                {
+                    wprintf(L"-swizzle requires a 1 to 4 character mask composed of these letters: r, g, b, a, x, y, w, z\n");
+                    return 1;
+                }
+                break;
             }
         }
         else if (wcspbrk(pArg, L"?*") != nullptr)
         {
             size_t count = conversion.size();
-            SearchForFiles(pArg, conversion, (dwOptions & (DWORD64(1) << OPT_RECURSIVE)) != 0);
+            SearchForFiles(pArg, conversion, (dwOptions & (DWORD64(1) << OPT_RECURSIVE)) != 0, nullptr);
             if (conversion.size() <= count)
             {
                 wprintf(L"No matching files found for %ls\n", pArg);
@@ -1616,10 +1721,8 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
         }
         else
         {
-            SConversion conv;
+            SConversion conv = {};
             wcscpy_s(conv.szSrc, MAX_PATH, pArg);
-
-            conv.szDest[0] = 0;
 
             conversion.push_back(conv);
         }
@@ -1637,11 +1740,6 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
     // Work out out filename prefix and suffix
     if (szOutputDir[0] && (L'\\' != szOutputDir[wcslen(szOutputDir) - 1]))
         wcscat_s(szOutputDir, MAX_PATH, L"\\");
-
-    if (szPrefix[0])
-        wcscat_s(szOutputDir, MAX_PATH, szPrefix);
-
-    wcscpy_s(szPrefix, MAX_PATH, szOutputDir);
 
     auto fileTypeName = LookupByValue(FileType, g_pSaveFileTypes);
 
@@ -2111,6 +2209,50 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
 
             assert(info.depth == tinfo.depth);
             assert(info.arraySize == tinfo.arraySize);
+            assert(info.miscFlags == tinfo.miscFlags);
+            assert(info.format == tinfo.format);
+            assert(info.dimension == tinfo.dimension);
+
+            image.swap(timage);
+            cimage.reset();
+        }
+
+        // --- Swizzle (if requested) --------------------------------------------------
+        if (swizzleElements[0] != 0 || swizzleElements[1] != 1 || swizzleElements[2] != 2 || swizzleElements[3] != 3)
+        {
+            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+            if (!timage)
+            {
+                wprintf(L"\nERROR: Memory allocation failed\n");
+                return 1;
+            }
+
+            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                {
+                    UNREFERENCED_PARAMETER(y);
+
+                    for (size_t j = 0; j < w; ++j)
+                    {
+                        outPixels[j] = XMVectorSwizzle(inPixels[j],
+                            swizzleElements[0], swizzleElements[1], swizzleElements[2], swizzleElements[3]);
+                    }
+                }, *timage);
+            if (FAILED(hr))
+            {
+                wprintf(L" FAILED [swizzle] (%x)\n", static_cast<unsigned int>(hr));
+                return 1;
+            }
+
+#ifndef NDEBUG
+            auto& tinfo = timage->GetMetadata();
+#endif
+
+            assert(info.width == tinfo.width);
+            assert(info.height == tinfo.height);
+            assert(info.depth == tinfo.depth);
+            assert(info.arraySize == tinfo.arraySize);
+            assert(info.mipLevels == tinfo.mipLevels);
             assert(info.miscFlags == tinfo.miscFlags);
             assert(info.format == tinfo.format);
             assert(info.dimension == tinfo.dimension);
@@ -3077,34 +3219,64 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
             // Figure out dest filename
             wchar_t *pchSlash, *pchDot;
 
-            wcscpy_s(pConv->szDest, MAX_PATH, szPrefix);
+            wchar_t szDest[1024] = {};
+            wcscpy_s(szDest, szOutputDir);
+
+            if (keepRecursiveDirs && *pConv->szFolder)
+            {
+                wcscat_s(szDest, pConv->szFolder);
+
+                wchar_t szPath[MAX_PATH] = {};
+                if (!GetFullPathNameW(szDest, MAX_PATH, szPath, nullptr))
+                {
+                    wprintf(L" get full path FAILED (%x)\n", static_cast<unsigned int>(HRESULT_FROM_WIN32(GetLastError())));
+                    continue;
+                }
+
+                auto err = static_cast<DWORD>(SHCreateDirectoryExW(nullptr, szPath, nullptr));
+                if (err != ERROR_SUCCESS && err != ERROR_ALREADY_EXISTS)
+                {
+                    wprintf(L" directory creation FAILED (%x)\n", static_cast<unsigned int>(HRESULT_FROM_WIN32(err)));
+                    continue;
+                }
+            }
+
+            if (*szPrefix)
+                wcscat_s(szDest, szPrefix);
 
             pchSlash = wcsrchr(pConv->szSrc, L'\\');
             if (pchSlash)
-                wcscat_s(pConv->szDest, MAX_PATH, pchSlash + 1);
+                wcscat_s(szDest, pchSlash + 1);
             else
-                wcscat_s(pConv->szDest, MAX_PATH, pConv->szSrc);
+                wcscat_s(szDest, pConv->szSrc);
 
-            pchSlash = wcsrchr(pConv->szDest, '\\');
-            pchDot = wcsrchr(pConv->szDest, '.');
+            pchSlash = wcsrchr(szDest, '\\');
+            pchDot = wcsrchr(szDest, '.');
 
             if (pchDot > pchSlash)
                 *pchDot = 0;
 
-            wcscat_s(pConv->szDest, MAX_PATH, szSuffix);
+            if (*szSuffix)
+                wcscat_s(szDest, szSuffix);
 
             if (dwOptions & (DWORD64(1) << OPT_TOLOWER))
             {
-                (void)_wcslwr_s(pConv->szDest);
+                (void)_wcslwr_s(szDest);
+            }
+
+            if (wcslen(szDest) > _MAX_PATH)
+            {
+                wprintf(L"\nERROR: Output filename exceeds max-path, skipping!\n");
+                continue;
             }
 
             // Write texture
-            wprintf(L"writing %ls", pConv->szDest);
+            wprintf(L"writing %ls", szDest);
             fflush(stdout);
 
             if (~dwOptions & (DWORD64(1) << OPT_OVERWRITE))
             {
-                if (GetFileAttributesW(pConv->szDest) != INVALID_FILE_ATTRIBUTES)
+                if (GetFileAttributesW(szDest) != INVALID_FILE_ATTRIBUTES)
                 {
                     wprintf(L"\nERROR: Output file already exists, use -y to overwrite:\n");
                     continue;
@@ -3125,29 +3297,29 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                     ddsFlags |= DDS_FLAGS_FORCE_DX9_LEGACY;
                 }
 
-                hr = SaveToDDSFile(img, nimg, info, ddsFlags, pConv->szDest);
+                hr = SaveToDDSFile(img, nimg, info, ddsFlags, szDest);
                 break;
             }
 
             case CODEC_TGA:
-                hr = SaveToTGAFile(img[0], TGA_FLAGS_NONE, pConv->szDest, (dwOptions & (DWORD64(1) << OPT_TGA20)) ? &info : nullptr);
+                hr = SaveToTGAFile(img[0], TGA_FLAGS_NONE, szDest, (dwOptions & (DWORD64(1) << OPT_TGA20)) ? &info : nullptr);
                 break;
 
             case CODEC_HDR:
-                hr = SaveToHDRFile(img[0], pConv->szDest);
+                hr = SaveToHDRFile(img[0], szDest);
                 break;
 
             case CODEC_PPM:
-                hr = SaveToPortablePixMap(img[0], pConv->szDest);
+                hr = SaveToPortablePixMap(img[0], szDest);
                 break;
 
             case CODEC_PFM:
-                hr = SaveToPortablePixMapHDR(img[0], pConv->szDest);
+                hr = SaveToPortablePixMapHDR(img[0], szDest);
                 break;
 
 #ifdef USE_OPENEXR
             case CODEC_EXR:
-                hr = SaveToEXRFile(img[0], pConv->szDest);
+                hr = SaveToEXRFile(img[0], szDest);
                 break;
 #endif
 
@@ -3155,7 +3327,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
             {
                 WICCodecs codec = (FileType == CODEC_HDP || FileType == CODEC_JXR) ? WIC_CODEC_WMP : static_cast<WICCodecs>(FileType);
                 size_t nimages = (dwOptions & (DWORD64(1) << OPT_WIC_MULTIFRAME)) ? nimg : 1;
-                hr = SaveToWICFile(img, nimages, WIC_FLAGS_NONE, GetWICCodec(codec), pConv->szDest, nullptr,
+                hr = SaveToWICFile(img, nimages, WIC_FLAGS_NONE, GetWICCodec(codec), szDest, nullptr,
                     [&](IPropertyBag2* props)
                     {
                         bool wicLossless = (dwOptions & (DWORD64(1) << OPT_WIC_LOSSLESS)) != 0;

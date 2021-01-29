@@ -24,8 +24,10 @@
 
 #include <Windows.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <new>
 
 #include "DirectXTex.h"
 #include "scoped.h"

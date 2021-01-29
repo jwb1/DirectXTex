@@ -24,7 +24,11 @@
 #define NOHELP
 #pragma warning(pop)
 
+#include <cstddef>
+#include <iterator>
 #include <memory>
+#include <new>
+#include <utility>
 #include <vector>
 
 #include <wrl/client.h>
@@ -154,7 +158,7 @@ HRESULT LoadAnimatedGif(const wchar_t* szFile, std::vector<std::unique_ptr<Scrat
         if (FAILED(hr))
             return hr;
 
-        hr = palette->GetColors(_countof(rgbColors), rgbColors, &actualColors);
+        hr = palette->GetColors(static_cast<UINT>(std::size(rgbColors)), rgbColors, &actualColors);
         if (FAILED(hr))
             return hr;
     }

@@ -20,13 +20,17 @@
 #define NOHELP
 #pragma warning(pop)
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <assert.h>
-
+#include <cassert>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cwchar>
 #include <fstream>
+#include <iterator>
 #include <memory>
+#include <new>
 #include <list>
+#include <utility>
 #include <vector>
 
 #include <wrl/client.h>
@@ -93,6 +97,7 @@ namespace
         OPT_FEATURE_LEVEL,
         OPT_TONEMAP,
         OPT_GIF_BGCOLOR,
+        OPT_SWIZZLE,
         OPT_MAX
     };
 
@@ -153,6 +158,7 @@ namespace
         { L"fl",        OPT_FEATURE_LEVEL },
         { L"tonemap",   OPT_TONEMAP },
         { L"bgcolor",   OPT_GIF_BGCOLOR },
+        { L"swizzle",   OPT_SWIZZLE },
         { nullptr,      0 }
     };
 
@@ -407,7 +413,7 @@ namespace
                     wchar_t dir[_MAX_DIR] = {};
                     _wsplitpath_s(path, drive, _MAX_DRIVE, dir, _MAX_DIR, nullptr, 0, nullptr, 0);
 
-                    SConversion conv;
+                    SConversion conv = {};
                     _wmakepath_s(conv.szSrc, drive, dir, findData.cFileName, nullptr);
                     files.push_back(conv);
                 }
@@ -563,7 +569,7 @@ namespace
         wchar_t version[32] = {};
 
         wchar_t appName[_MAX_PATH] = {};
-        if (GetModuleFileNameW(nullptr, appName, _countof(appName)))
+        if (GetModuleFileNameW(nullptr, appName, static_cast<DWORD>(std::size(appName))))
         {
             DWORD size = GetFileVersionInfoSizeW(appName, nullptr);
             if (size > 0)
@@ -629,6 +635,8 @@ namespace
         wprintf(L"   -tonemap            Apply a tonemap operator based on maximum luminance\n");
         wprintf(L"\n                       (gif only)\n");
         wprintf(L"   -bgcolor            Use background color instead of transparency\n");
+        wprintf(L"\n                       (merge only)\n");
+        wprintf(L"   -swizzle <rgba>     Select channels for merge (defaults to rgbB)\n");
 
         wprintf(L"\n   <format>: ");
         PrintList(13, g_pFormats);
@@ -665,6 +673,78 @@ namespace
             return SaveToWICFile(img, WIC_FLAGS_NONE, GetWICCodec(static_cast<WICCodecs>(fileType)), szOutputFile);
         }
     }
+
+
+    bool ParseSwizzleMask(_In_reads_(4) const wchar_t* mask, _Out_writes_(4) uint32_t* permuteElements)
+    {
+        if (!mask || !permuteElements)
+            return false;
+
+        if (!mask[0])
+            return false;
+
+        for (size_t j = 0; j < 4; ++j)
+        {
+            if (!mask[j])
+                break;
+
+            switch (mask[j])
+            {
+            case L'r':
+            case L'x':
+                for (size_t k = j; k < 4; ++k)
+                    permuteElements[k] = 0;
+                break;
+
+            case L'R':
+            case L'X':
+                for (size_t k = j; k < 4; ++k)
+                    permuteElements[k] = 4;
+                break;
+
+            case L'g':
+            case L'y':
+                for (size_t k = j; k < 4; ++k)
+                    permuteElements[k] = 1;
+                break;
+
+            case L'G':
+            case L'Y':
+                for (size_t k = j; k < 4; ++k)
+                    permuteElements[k] = 5;
+                break;
+
+            case L'b':
+            case L'z':
+                for (size_t k = j; k < 4; ++k)
+                    permuteElements[k] = 2;
+                break;
+
+            case L'B':
+            case L'Z':
+                for (size_t k = j; k < 4; ++k)
+                    permuteElements[k] = 6;
+                break;
+
+            case L'a':
+            case L'w':
+                for (size_t k = j; k < 4; ++k)
+                    permuteElements[k] = 3;
+                break;
+
+            case L'A':
+            case L'W':
+                for (size_t k = j; k < 4; ++k)
+                    permuteElements[k] = 7;
+                break;
+
+            default:
+                return false;
+            }
+        }
+
+        return true;
+    }
 }
 
 //--------------------------------------------------------------------------------------
@@ -689,6 +769,9 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
     DWORD maxCube = 16384;
     DWORD maxArray = 2048;
     DWORD maxVolume = 2048;
+
+    // DXTex's Open Alpha onto Surface always loaded alpha from the blue channel
+    uint32_t permuteElements[4] = { 0, 1, 2, 6 };
 
     wchar_t szOutputFile[MAX_PATH] = {};
 
@@ -765,6 +848,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
             case OPT_FILTER:
             case OPT_OUTPUTFILE:
             case OPT_FEATURE_LEVEL:
+            case OPT_SWIZZLE:
                 if (!*pValue)
                 {
                     if ((iArg + 1 >= argc))
@@ -922,7 +1006,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                     }
                     else
                     {
-                        SConversion conv;
+                        SConversion conv = {};
                         wcscpy_s(conv.szSrc, MAX_PATH, fname);
                         conversion.push_back(conv);
                     }
@@ -955,6 +1039,25 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
                 }
                 break;
 
+            case OPT_SWIZZLE:
+                if (dwCommand != CMD_MERGE)
+                {
+                    wprintf(L"-swizzle only applies to merge command\n");
+                    return 1;
+                }
+                if (!*pValue || wcslen(pValue) > 4)
+                {
+                    wprintf(L"Invalid value specified with -swizzle (%ls)\n\n", pValue);
+                    PrintUsage();
+                    return 1;
+                }
+                else if (!ParseSwizzleMask(pValue, permuteElements))
+                {
+                    wprintf(L"-swizzle requires a 1 to 4 character mask composed of these letters: r, g, b, a, x, y, w, z.\n    Lowercase letters are from the first image, upper-case letters are from the second image.\n");
+                    return 1;
+                }
+                break;
+
             default:
                 break;
             }
@@ -971,7 +1074,7 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
         }
         else
         {
-            SConversion conv;
+            SConversion conv = {};
             wcscpy_s(conv.szSrc, MAX_PATH, pArg);
 
             conversion.push_back(conv);
@@ -1685,54 +1788,30 @@ int __cdecl wmain(_In_ int argc, _In_z_count_(argc) wchar_t* argv[])
 
     case CMD_MERGE:
     {
-        // Capture alpha from source image (the second input filename)
-        ScratchImage alphaImage;
-        hr = alphaImage.Initialize2D(DXGI_FORMAT_R32_FLOAT, width, height, 1, 1);
+        // Capture data from our second source image
+        ScratchImage tempImage;
+        hr = Convert(*loadedImages[1]->GetImage(0, 0, 0), DXGI_FORMAT_R32G32B32A32_FLOAT,
+            dwFilter | dwFilterOpts | dwSRGB, TEX_THRESHOLD_DEFAULT, tempImage);
         if (FAILED(hr))
         {
-            wprintf(L"FAILED setting up alpha image (%x)\n", static_cast<unsigned int>(hr));
+            wprintf(L" FAILED [convert second input] (%x)\n", static_cast<unsigned int>(hr));
             return 1;
         }
 
-        const Image& img = *alphaImage.GetImage(0, 0, 0);
+        const Image& img = *tempImage.GetImage(0, 0, 0);
 
-        hr = EvaluateImage(*loadedImages[1]->GetImage(0, 0, 0),
-            [&](const XMVECTOR* pixels, size_t w, size_t y)
-            {
-                auto alphaPtr = reinterpret_cast<float*>(img.pixels + img.rowPitch * y);
-
-                for (size_t j = 0; j < w; ++j)
-                {
-                    XMVECTOR value = pixels[j];
-
-                    // DXTex's Open Alpha onto Surface always loaded alpha from the blue channel
-
-                    *alphaPtr++ = XMVectorGetZ(value);
-                }
-            });
-        if (FAILED(hr))
-        {
-            wprintf(L" FAILED [reading alpha image] (%x)\n", static_cast<unsigned int>(hr));
-            return 1;
-        }
-
-        // Merge with rgb from our source iamge (the first input filename)
+        // Merge with our first source image
         const Image& rgb = *loadedImages[0]->GetImage(0, 0, 0);
 
         ScratchImage result;
         hr = TransformImage(rgb, [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
             {
-                auto alphaPtr = reinterpret_cast<float*>(img.pixels + img.rowPitch * y);
+                const XMVECTOR *inPixels2 = reinterpret_cast<XMVECTOR*>(img.pixels + img.rowPitch * y);
 
                 for (size_t j = 0; j < w; ++j)
                 {
-                    XMVECTOR value = inPixels[j];
-
-                    XMVECTOR nvalue = XMVectorReplicate(*alphaPtr++);
-
-                    value = XMVectorSelect(nvalue, value, g_XMSelect1110);
-
-                    outPixels[j] = value;
+                    outPixels[j] = XMVectorPermute(inPixels[j], inPixels2[j],
+                        permuteElements[0], permuteElements[1], permuteElements[2], permuteElements[3]);
                 }
             }, result);
         if (FAILED(hr))
